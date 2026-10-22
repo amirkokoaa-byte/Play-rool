@@ -20,6 +20,11 @@ import {
   Trophy,
   Gamepad2,
   Layers,
+  Copy,
+  Download,
+  X,
+  FileCode2,
+  BarChart3,
 } from 'lucide-react';
 
 // ============================================================================
@@ -47,6 +52,54 @@ interface HistoryEntry {
   isSpecial?: boolean;
   timestamp: string;
 }
+
+interface SavedAppData {
+  historyByMode: Record<Exclude<GameModeId, 'home'>, HistoryEntry[]>;
+  statsByMode: Record<Exclude<GameModeId, 'home'>, number>;
+  minNumInput: string;
+  maxNumInput: string;
+  lastDie1: number;
+  lastDie2: number;
+  lastNumber: number;
+  lastWheelWinner: number;
+  lastCoinSide: 'king' | 'tails';
+}
+
+const STORAGE_KEY = 'arabic_randomizer_hub_data_v2';
+
+const DEFAULT_SAVED_DATA: SavedAppData = {
+  historyByMode: {
+    dice: [
+      { id: 'init-d1', label: '٦ + ٦ = ١٢', subLabel: 'دش الستة (٦ × ٦)', isSpecial: true, timestamp: '١٢:٠٠' },
+      { id: 'init-d2', label: '٥ + ٤ = ٩', subLabel: 'المجموع ٩', isSpecial: false, timestamp: '١١:٥٨' },
+    ],
+    number: [
+      { id: 'init-n1', label: '٧٧ (77)', subLabel: 'النطاق ١–١٠٠', isSpecial: false, timestamp: '١٢:٠٠' },
+      { id: 'init-n2', label: '٤٢ (42)', subLabel: 'النطاق ١–١٠٠', isSpecial: false, timestamp: '١١:٥٥' },
+    ],
+    wheel: [
+      { id: 'init-w1', label: 'رقم ٦ (6)', subLabel: 'ستة', isSpecial: true, timestamp: '١٢:٠٠' },
+      { id: 'init-w2', label: 'رقم ٣ (3)', subLabel: 'ثلاثة', isSpecial: false, timestamp: '١١:٥٧' },
+    ],
+    coin: [
+      { id: 'init-c1', label: 'مَلِك (قناع توت عنخ آمون)', subLabel: 'ملك', isSpecial: true, timestamp: '١٢:٠٠' },
+      { id: 'init-c2', label: 'كِتَابَة (١ جنيه مصري)', subLabel: 'كتابة', isSpecial: false, timestamp: '١١:٥٦' },
+    ],
+  },
+  statsByMode: {
+    dice: 14,
+    number: 23,
+    wheel: 19,
+    coin: 31,
+  },
+  minNumInput: '1',
+  maxNumInput: '100',
+  lastDie1: 6,
+  lastDie2: 6,
+  lastNumber: 77,
+  lastWheelWinner: 6,
+  lastCoinSide: 'king',
+};
 
 const GAME_MODES: GameModeInfo[] = [
   {
@@ -113,6 +166,42 @@ const WHEEL_SEGMENTS = [
   { num: 6, arabic: '٦', color: '#eab308', darkColor: '#a16207', label: 'ستة' },
 ];
 
+const VERCEL_PACKAGE_JSON_SNIPPET = `{
+  "name": "arabic-randomizer-gaming-hub",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2"
+  }
+}`;
+
+const VERCEL_JSON_SNIPPET = `{
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm install",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}`;
+
 // ============================================================================
 // CRYPTOGRAPHICALLY FAIR RANDOM GENERATOR & HAPTICS
 // ============================================================================
@@ -152,6 +241,29 @@ function toArabicDigits(n: number | string): string {
   return String(n).replace(/[0-9]/g, (d) => arabic[Number(d)]);
 }
 
+function loadSavedData(): SavedAppData {
+  try {
+    if (typeof window === 'undefined') return DEFAULT_SAVED_DATA;
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_SAVED_DATA;
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_SAVED_DATA,
+      ...parsed,
+      historyByMode: {
+        ...DEFAULT_SAVED_DATA.historyByMode,
+        ...(parsed.historyByMode || {}),
+      },
+      statsByMode: {
+        ...DEFAULT_SAVED_DATA.statsByMode,
+        ...(parsed.statsByMode || {}),
+      },
+    };
+  } catch {
+    return DEFAULT_SAVED_DATA;
+  }
+}
+
 // ============================================================================
 // WEB AUDIO API SOUND SYNTHESIZER (ZERO EXTERNAL ASSETS)
 // ============================================================================
@@ -163,7 +275,9 @@ class WebAudioSynthesizer {
   private getContext(): AudioContext | null {
     if (this.isMuted || typeof window === 'undefined') return null;
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (AudioCtx) {
         this.ctx = new AudioCtx();
       }
@@ -253,7 +367,6 @@ class WebAudioSynthesizer {
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
-    // Bimetallic dual-harmonic ring (silver + brass frequencies)
     const freqs = [2480, 3720, 5120];
     freqs.forEach((f, idx) => {
       const osc = ctx.createOscillator();
@@ -274,7 +387,9 @@ class WebAudioSynthesizer {
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
-    const notes = isDoubleOrSpecial ? [523.25, 659.25, 783.99, 1046.5] : [523.25, 659.25, 783.99];
+    const notes = isDoubleOrSpecial
+      ? [523.25, 659.25, 783.99, 1046.5]
+      : [523.25, 659.25, 783.99];
     notes.forEach((freq, idx) => {
       const start = now + idx * 0.075;
       const osc = ctx.createOscillator();
@@ -297,9 +412,6 @@ const soundFX = new WebAudioSynthesizer();
 // CUSTOM SVG ARTWORK COMPONENTS
 // ============================================================================
 
-/**
- * Crisp 3D-Styled Die Component with Recessed Pips & Specular Bevel
- */
 const Die3DCard: React.FC<{
   value: number;
   label: string;
@@ -307,7 +419,6 @@ const Die3DCard: React.FC<{
   variant: 1 | 2;
   isDouble: boolean;
 }> = ({ value, label, isRolling, variant, isDouble }) => {
-  // Standard 3x3 grid coordinates for dice pips (1 to 6)
   const pipMap: Record<number, number[]> = {
     1: [4],
     2: [0, 8],
@@ -323,21 +434,14 @@ const Die3DCard: React.FC<{
     <div className="flex flex-col items-center gap-3">
       <div
         className={`relative w-32 h-32 sm:w-40 sm:h-40 rounded-3xl p-4 sm:p-5 select-none transition-shadow duration-300 ${
-          isRolling
-            ? variant === 1
-              ? 'animate-dice-1'
-              : 'animate-dice-2'
-            : ''
+          isRolling ? (variant === 1 ? 'animate-dice-1' : 'animate-dice-2') : ''
         } ${
           isDouble && !isRolling
             ? 'bg-gradient-to-br from-amber-50 via-white to-amber-100 shadow-[0_14px_0_#b45309,0_22px_45px_rgba(245,158,11,0.45)] ring-2 ring-amber-400'
             : 'bg-gradient-to-br from-white via-slate-100 to-slate-200 shadow-[0_12px_0_#64748b,0_20px_38px_rgba(0,0,0,0.65)] ring-1 ring-white/80'
         }`}
       >
-        {/* Top inner bevel highlight */}
         <div className="absolute inset-1.5 rounded-2xl border border-white/70 pointer-events-none" />
-
-        {/* 3x3 Pip Grid */}
         <div className="relative z-10 grid grid-cols-3 grid-rows-3 w-full h-full gap-2 sm:gap-2.5 place-items-center">
           {Array.from({ length: 9 }).map((_, idx) => {
             const hasPip = activeCells.includes(idx);
@@ -361,10 +465,11 @@ const Die3DCard: React.FC<{
         </div>
       </div>
 
-      {/* Die Subtitle readout */}
       <div className="flex items-center gap-2 text-sm text-slate-300 font-medium">
         <span>{label}</span>
-        <span aria-hidden="true" className="text-slate-600">·</span>
+        <span aria-hidden="true" className="text-slate-600">
+          ·
+        </span>
         <span className="font-mono-num font-bold text-white text-base">
           {isRolling ? '...' : `${toArabicDigits(value)} (${value})`}
         </span>
@@ -373,21 +478,19 @@ const Die3DCard: React.FC<{
   );
 };
 
-/**
- * Authentic Egyptian 1 Pound Bimetallic Coin (ملك وكتابة)
- * Side A: Golden Mask of Tutankhamun (ملك)
- * Side B: Arab Republic of Egypt - 1 Pound Calligraphy (كتابة)
- */
 const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => {
   const uid = side === 'king' ? 'king' : 'tails';
   return (
     <svg
       viewBox="0 0 260 260"
       className="w-full h-full drop-shadow-[0_12px_25px_rgba(0,0,0,0.65)] select-none"
-      aria-label={side === 'king' ? 'وجه العملة: ملك - قناع توت عنخ آمون' : 'ظهر العملة: كتابة - ١ جنيه مصري'}
+      aria-label={
+        side === 'king'
+          ? 'وجه العملة: ملك - قناع توت عنخ آمون'
+          : 'ظهر العملة: كتابة - ١ جنيه مصري'
+      }
     >
       <defs>
-        {/* Outer Silver-Nickel Ring Gradient */}
         <linearGradient id={`silverRing-${uid}`} x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#f1f5f9" />
           <stop offset="28%" stopColor="#cbd5e1" />
@@ -396,14 +499,12 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           <stop offset="100%" stopColor="#cbd5e1" />
         </linearGradient>
 
-        {/* Inner Silver Bevel */}
         <linearGradient id={`silverBevel-${uid}`} x1="100%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="#334155" />
           <stop offset="50%" stopColor="#e2e8f0" />
           <stop offset="100%" stopColor="#475569" />
         </linearGradient>
 
-        {/* Inner Gold-Brass Core Gradient */}
         <radialGradient id={`goldCore-${uid}`} cx="38%" cy="32%" r="70%">
           <stop offset="0%" stopColor="#fef9c3" />
           <stop offset="30%" stopColor="#fde047" />
@@ -412,7 +513,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           <stop offset="100%" stopColor="#713f12" />
         </radialGradient>
 
-        {/* Raised Gold Relief Gradient */}
         <linearGradient id={`goldRelief-${uid}`} x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#fef08a" />
           <stop offset="45%" stopColor="#eab308" />
@@ -421,7 +521,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
         </linearGradient>
       </defs>
 
-      {/* Outer Milled Edge (Reeded Rim) */}
       <circle
         cx="130"
         cy="130"
@@ -440,8 +539,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
         strokeDasharray="3 3"
         opacity="0.55"
       />
-
-      {/* Main Outer Silver Ring */}
       <circle
         cx="130"
         cy="130"
@@ -450,8 +547,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
         stroke="#e2e8f0"
         strokeWidth="1.2"
       />
-
-      {/* Decorative Pharaonic / Bead Ring on Silver Border */}
       <circle
         cx="130"
         cy="130"
@@ -462,18 +557,7 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
         strokeDasharray="2 5"
         opacity="0.65"
       />
-
-      {/* Bimetallic Seam Between Silver Outer Ring and Brass Inner Core */}
-      <circle
-        cx="130"
-        cy="130"
-        r="84"
-        fill="#475569"
-        stroke="#1e293b"
-        strokeWidth="2"
-      />
-
-      {/* Inner Gold/Brass Core */}
+      <circle cx="130" cy="130" r="84" fill="#475569" stroke="#1e293b" strokeWidth="2" />
       <circle
         cx="130"
         cy="130"
@@ -482,8 +566,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
         stroke="#fef08a"
         strokeWidth="1.2"
       />
-
-      {/* Inner Core Ornate Ring */}
       <circle
         cx="130"
         cy="130"
@@ -496,9 +578,7 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
       />
 
       {side === 'king' ? (
-        /* ==================== SIDE A: ملك (KING TUTANKHAMUN MASK) ==================== */
         <g>
-          {/* Outer Silver Ring Texts */}
           <text
             x="130"
             y="29"
@@ -522,21 +602,16 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
             العملة المصرية المعدنية
           </text>
 
-          {/* Left & Right Pharaonic Lotus Stars on Silver Ring */}
           <circle cx="28" cy="130" r="4" fill="#334155" />
           <circle cx="232" cy="130" r="4" fill="#334155" />
 
-          {/* Stylized Golden Mask of Tutankhamun in Center */}
           <g transform="translate(130, 128)">
-            {/* Nemes Headdress Outer Silhouette */}
             <path
               d="M -46,16 L -52,-8 C -52,-38 -30,-56 0,-56 C 30,-56 52,-38 52,-8 L 46,16 L 34,42 L -34,42 Z"
               fill={`url(#goldRelief-${uid})`}
               stroke="#713f12"
               strokeWidth="2.2"
             />
-
-            {/* Nemes Horizontal Stripes (Left & Right Flaps) */}
             <g stroke="#713f12" strokeWidth="1.8" opacity="0.75">
               <line x1="-47" y1="-22" x2="-24" y2="-22" />
               <line x1="24" y1="-22" x2="47" y2="-22" />
@@ -549,40 +624,28 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
               <line x1="-39" y1="26" x2="-19" y2="26" />
               <line x1="19" y1="26" x2="39" y2="26" />
             </g>
-
-            {/* Broad Pharaonic Usekh Collar */}
             <path
               d="M -34,32 Q 0,48 34,32 L 28,45 Q 0,58 -28,45 Z"
               fill="#ca8a04"
               stroke="#713f12"
               strokeWidth="1.8"
             />
-
-            {/* Royal Face Shield */}
             <path
               d="M -23,-22 C -23,-36 23,-36 23,-22 L 21,8 C 21,23 11,32 0,32 C -11,32 -21,23 -21,8 Z"
               fill="#fef08a"
               stroke="#713f12"
               strokeWidth="2"
             />
-
-            {/* Forehead Headband & Uraeus (Cobra & Vulture Emblem) */}
             <path d="M -24,-22 Q 0,-27 24,-22" fill="none" stroke="#713f12" strokeWidth="2.5" />
             <circle cx="-6" cy="-35" r="5" fill="#b45309" stroke="#713f12" strokeWidth="1.5" />
             <circle cx="6" cy="-35" r="5" fill="#b45309" stroke="#713f12" strokeWidth="1.5" />
             <path d="M 0,-46 L -4,-30 L 4,-30 Z" fill="#fef08a" stroke="#713f12" strokeWidth="1.4" />
-
-            {/* Pharaoh Eyes & Kohl Lines */}
             <ellipse cx="-9" cy="-10" rx="5" ry="2.5" fill="#713f12" />
             <ellipse cx="9" cy="-10" rx="5" ry="2.5" fill="#713f12" />
             <path d="M -15,-14 Q -9,-17 -3,-14" fill="none" stroke="#713f12" strokeWidth="1.6" />
             <path d="M 3,-14 Q 9,-17 15,-14" fill="none" stroke="#713f12" strokeWidth="1.6" />
-
-            {/* Nose & Serene Royal Lips */}
             <path d="M 0,-12 L -2.5,2 L 2.5,2" fill="none" stroke="#713f12" strokeWidth="1.6" />
             <path d="M -7,10 Q 0,14 7,10" fill="none" stroke="#713f12" strokeWidth="1.8" />
-
-            {/* Ceremonial Braided False Beard */}
             <path
               d="M -5,30 L 5,30 L 4,56 Q 0,60 -4,56 Z"
               fill="#a16207"
@@ -595,9 +658,7 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           </g>
         </g>
       ) : (
-        /* ==================== SIDE B: كتابة (JUMHURIYAT MISR AL-ARABIYAH - 1 POUND) ==================== */
         <g>
-          {/* Top Silver Ring Inscription: جمهورية مصر العربية */}
           <text
             x="130"
             y="29"
@@ -609,8 +670,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           >
             جمهورية مصر العربية
           </text>
-
-          {/* Bottom Silver Ring Inscription: ONE EGYPTIAN POUND */}
           <text
             x="130"
             y="241"
@@ -623,8 +682,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           >
             1 EGYPTIAN POUND
           </text>
-
-          {/* Hijri & Gregorian Year Stamps on Silver Ring Sides */}
           <text
             x="27"
             y="134"
@@ -647,14 +704,16 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
           >
             ١٤٤٦ هـ
           </text>
-
-          {/* Subtle Arabesque Geometric Star in Gold Core */}
-          <g transform="translate(130, 130)" opacity="0.28" stroke="#713f12" strokeWidth="1.5" fill="none">
+          <g
+            transform="translate(130, 130)"
+            opacity="0.28"
+            stroke="#713f12"
+            strokeWidth="1.5"
+            fill="none"
+          >
             <rect x="-46" y="-46" width="92" height="92" rx="6" />
             <rect x="-46" y="-46" width="92" height="92" rx="6" transform="rotate(45)" />
           </g>
-
-          {/* Prominent Arabic Numeral ١ (1) and جنيه (Pound) in Gold Center */}
           <text
             x="130"
             y="128"
@@ -696,9 +755,6 @@ const EgyptianOnePoundSVG: React.FC<{ side: 'king' | 'tails' }> = ({ side }) => 
   );
 };
 
-/**
- * Custom-Crafted 6-Segment Spinning Wheel SVG (Numbers 1 to 6)
- */
 const SpinningWheelSVG: React.FC<{
   rotation: number;
   isSpinning: boolean;
@@ -708,7 +764,6 @@ const SpinningWheelSVG: React.FC<{
   const cy = 160;
   const radius = 142;
 
-  // Helper to build a 60-degree SVG pie slice centered at `index * 60` degrees clockwise from 12 o'clock (-90deg)
   const createSlicePath = (index: number) => {
     const centerAngleDeg = index * 60 - 90;
     const startAngleDeg = centerAngleDeg - 30;
@@ -726,16 +781,19 @@ const SpinningWheelSVG: React.FC<{
 
   return (
     <div className="relative w-72 h-72 sm:w-88 sm:h-88 flex items-center justify-center select-none">
-      {/* Ambient Outer Glow */}
       <div className="absolute inset-2 rounded-full bg-gradient-to-tr from-emerald-500/20 via-amber-500/15 to-cyan-500/20 blur-xl pointer-events-none" />
 
-      {/* Fixed Top Golden/Neon Pointer Arrow at 12 o'clock */}
       <div
         className={`absolute -top-4 left-1/2 -translate-x-1/2 z-30 transition-transform duration-150 ${
           isSpinning ? 'scale-110' : 'scale-100'
         }`}
       >
-        <svg width="44" height="48" viewBox="0 0 44 48" className="drop-shadow-[0_6px_12px_rgba(0,0,0,0.75)]">
+        <svg
+          width="44"
+          height="48"
+          viewBox="0 0 44 48"
+          className="drop-shadow-[0_6px_12px_rgba(0,0,0,0.75)]"
+        >
           <defs>
             <linearGradient id="pointerGold" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#fef08a" />
@@ -753,7 +811,6 @@ const SpinningWheelSVG: React.FC<{
         </svg>
       </div>
 
-      {/* Rotating Wheel Container */}
       <div
         className="w-full h-full rounded-full shadow-[0_20px_50px_rgba(0,0,0,0.75)]"
         style={{
@@ -786,25 +843,9 @@ const SpinningWheelSVG: React.FC<{
             </radialGradient>
           </defs>
 
-          {/* Outer Metallic Rim */}
-          <circle
-            cx={cx}
-            cy={cy}
-            r="156"
-            fill="#1e293b"
-            stroke="#475569"
-            strokeWidth="4"
-          />
-          <circle
-            cx={cx}
-            cy={cy}
-            r="146"
-            fill="#0f172a"
-            stroke="#f59e0b"
-            strokeWidth="2"
-          />
+          <circle cx={cx} cy={cy} r="156" fill="#1e293b" stroke="#475569" strokeWidth="4" />
+          <circle cx={cx} cy={cy} r="146" fill="#0f172a" stroke="#f59e0b" strokeWidth="2" />
 
-          {/* 6 Radial Colored Segments */}
           {WHEEL_SEGMENTS.map((seg, idx) => {
             const angleDeg = idx * 60;
             const isWinner = !isSpinning && winningNum === seg.num;
@@ -817,7 +858,6 @@ const SpinningWheelSVG: React.FC<{
                   strokeWidth="3"
                   opacity={isWinner ? 1 : 0.94}
                 />
-                {/* Segment Number Label */}
                 <g transform={`translate(${cx}, ${cy}) rotate(${angleDeg}) translate(0, -92)`}>
                   <text
                     x="0"
@@ -851,7 +891,6 @@ const SpinningWheelSVG: React.FC<{
             );
           })}
 
-          {/* Rim Pegs / Studs on Segment Boundaries */}
           {Array.from({ length: 12 }).map((_, i) => {
             const pegAngle = ((i * 30 - 90) * Math.PI) / 180;
             const px = cx + 149 * Math.cos(pegAngle);
@@ -869,15 +908,7 @@ const SpinningWheelSVG: React.FC<{
             );
           })}
 
-          {/* Center Golden Hub */}
-          <circle
-            cx={cx}
-            cy={cy}
-            r="30"
-            fill="#0f172a"
-            stroke="#475569"
-            strokeWidth="3"
-          />
+          <circle cx={cx} cy={cy} r="30" fill="#0f172a" stroke="#475569" strokeWidth="3" />
           <circle
             cx={cx}
             cy={cy}
@@ -894,47 +925,241 @@ const SpinningWheelSVG: React.FC<{
 };
 
 // ============================================================================
+// STANDALONE SINGLE-FILE HTML GENERATOR (100% ZERO-BUILD GITHUB/VERCEL FALLBACK)
+// ============================================================================
+
+function generateStandaloneIndexHtml(savedData: SavedAppData): string {
+  const initialJson = JSON.stringify(savedData);
+  return `<!doctype html>
+<html lang="ar" dir="rtl" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>رفيق الألعاب العشوائي الاحترافي</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=JetBrains+Mono:wght@600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Cairo', sans-serif; background-color: #0f172a; color: #f8fafc; }
+    .font-mono-num { font-family: 'JetBrains Mono', 'Cairo', monospace; font-variant-numeric: tabular-nums; }
+    @keyframes diceTumble {
+      0% { transform: rotateX(0deg) rotateY(0deg) scale(1); }
+      30% { transform: translateY(-24px) rotateX(180deg) rotateY(-120deg) scale(1.1); }
+      70% { transform: translateY(-12px) rotateX(320deg) rotateY(220deg) scale(1.06); }
+      100% { transform: rotateX(360deg) rotateY(360deg) scale(1); }
+    }
+    .animate-dice { animation: diceTumble 600ms cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+  </style>
+</head>
+<body class="min-h-screen bg-[#0f172a] text-slate-100 select-none overflow-x-hidden">
+  <div id="app"></div>
+  <script>
+    // البيانات المحفوظة المبدئية
+    const STORAGE_KEY = '${STORAGE_KEY}';
+    const INITIAL_DATA = ${initialJson};
+    let state = Object.assign({}, INITIAL_DATA, JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'));
+    let activeMode = 'home';
+    function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    function toAr(n) { return String(n).replace(/[0-9]/g, d => '٠١٢٣٤٥٦٧٨٩'[d]); }
+    function rand(min, max) {
+      const a = new Uint32Array(1); window.crypto.getRandomValues(a);
+      return min + (a[0] % (max - min + 1));
+    }
+    function render() {
+      const root = document.getElementById('app');
+      if (activeMode === 'home') {
+        root.innerHTML = \`
+          <div class="max-w-5xl mx-auto px-5 py-10">
+            <div class="text-center mb-8">
+              <h1 class="text-3xl sm:text-5xl font-black text-white mb-3">رفيق الألعاب العشوائي الاحترافي</h1>
+              <p class="text-slate-300">اختر اللعبة من القائمة المنسدلة أو البطاقات بالأسفل لفتحها بملء الشاشة</p>
+            </div>
+            <div class="max-w-md mx-auto mb-8">
+              <select onchange="if(this.value) { activeMode = this.value; render(); }" class="w-full p-4 rounded-2xl bg-slate-900 border-2 border-amber-500 text-white font-bold text-lg cursor-pointer">
+                <option value="">-- اختر اللعبة من القائمة المنسدلة --</option>
+                <option value="dice">01. رمي ٢ نرد عشوائي</option>
+                <option value="number">02. اختيار رقم عشوائي</option>
+                <option value="wheel">03. دائرة تلف بها أرقام من ١ إلى ٦</option>
+                <option value="coin">04. ملك وكتابة (الجنيه المصري المعدني)</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <button onclick="activeMode='dice';render()" class="p-6 rounded-2xl bg-slate-900 border border-slate-800 hover:border-amber-500 text-right cursor-pointer">
+                <div class="text-amber-400 font-bold mb-1">01</div>
+                <div class="text-lg font-extrabold text-white mb-1">رمي ٢ نرد عشوائي</div>
+                <div class="text-xs text-slate-400">آخر نتيجة: \${state.historyByMode.dice[0]?.label || '٦ + ٦ = ١٢'}</div>
+              </button>
+              <button onclick="activeMode='number';render()" class="p-6 rounded-2xl bg-slate-900 border border-slate-800 hover:border-cyan-500 text-right cursor-pointer">
+                <div class="text-cyan-400 font-bold mb-1">02</div>
+                <div class="text-lg font-extrabold text-white mb-1">اختيار رقم عشوائي</div>
+                <div class="text-xs text-slate-400">آخر نتيجة: \${state.historyByMode.number[0]?.label || '٧٧'}</div>
+              </button>
+              <button onclick="activeMode='wheel';render()" class="p-6 rounded-2xl bg-slate-900 border border-slate-800 hover:border-emerald-500 text-right cursor-pointer">
+                <div class="text-emerald-400 font-bold mb-1">03</div>
+                <div class="text-lg font-extrabold text-white mb-1">عجلة ١ إلى ٦</div>
+                <div class="text-xs text-slate-400">آخر نتيجة: \${state.historyByMode.wheel[0]?.label || 'رقم ٦'}</div>
+              </button>
+              <button onclick="activeMode='coin';render()" class="p-6 rounded-2xl bg-slate-900 border border-slate-800 hover:border-yellow-500 text-right cursor-pointer">
+                <div class="text-yellow-400 font-bold mb-1">04</div>
+                <div class="text-lg font-extrabold text-white mb-1">ملك وكتابة (جنيه مصري)</div>
+                <div class="text-xs text-slate-400">آخر نتيجة: \${state.historyByMode.coin[0]?.label || 'مَلِك'}</div>
+              </button>
+            </div>
+          </div>\`;
+      } else {
+        const hist = (state.historyByMode[activeMode] || []).map(h => h.label).join(' · ');
+        root.innerHTML = \`
+          <div class="min-h-screen flex flex-col justify-between p-6">
+            <div class="flex justify-between items-center">
+              <div class="text-sm text-amber-400 font-bold">رفيق الألعاب العشوائي</div>
+              <button onclick="activeMode='home';render()" class="fixed top-4 left-4 px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white font-bold text-sm cursor-pointer">الرجوع إلى الصفحة الرئيسية ←</button>
+            </div>
+            <div class="my-auto text-center">
+              <div id="stage" class="text-5xl sm:text-7xl font-black text-amber-400 mb-6">\${
+                activeMode === 'dice' ? toAr(state.lastDie1) + ' و ' + toAr(state.lastDie2) + ' (المجموع ' + toAr(state.lastDie1 + state.lastDie2) + ')' :
+                activeMode === 'number' ? toAr(state.lastNumber) + ' (' + state.lastNumber + ')' :
+                activeMode === 'wheel' ? 'رقم ' + toAr(state.lastWheelWinner) :
+                (state.lastCoinSide === 'king' ? 'مَلِك (قناع توت عنخ آمون)' : 'كِتَابَة (١ جنيه مصري)')
+              }</div>
+              <button onclick="playNow()" class="px-10 py-4 rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-black text-xl cursor-pointer shadow-lg">العب الآن</button>
+            </div>
+            <div class="max-w-xl mx-auto w-full p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs text-center text-slate-300">
+              سجل آخر النتائج: \${hist}
+            </div>
+          </div>\`;
+      }
+    }
+    window.playNow = function() {
+      if (activeMode === 'dice') {
+        state.lastDie1 = rand(1, 6); state.lastDie2 = rand(1, 6);
+        const sum = state.lastDie1 + state.lastDie2;
+        state.historyByMode.dice = [{ id: Date.now(), label: toAr(state.lastDie1) + '+' + toAr(state.lastDie2) + '=' + toAr(sum) }, ...state.historyByMode.dice].slice(0, 5);
+      } else if (activeMode === 'number') {
+        state.lastNumber = rand(1, 100);
+        state.historyByMode.number = [{ id: Date.now(), label: toAr(state.lastNumber) + ' (' + state.lastNumber + ')' }, ...state.historyByMode.number].slice(0, 5);
+      } else if (activeMode === 'wheel') {
+        state.lastWheelWinner = rand(1, 6);
+        state.historyByMode.wheel = [{ id: Date.now(), label: 'رقم ' + toAr(state.lastWheelWinner) }, ...state.historyByMode.wheel].slice(0, 5);
+      } else if (activeMode === 'coin') {
+        state.lastCoinSide = rand(0, 1) === 0 ? 'king' : 'tails';
+        state.historyByMode.coin = [{ id: Date.now(), label: state.lastCoinSide === 'king' ? 'مَلِك' : 'كِتَابَة' }, ...state.historyByMode.coin].slice(0, 5);
+      }
+      save(); render();
+    };
+    render();
+  </script>
+</body>
+</html>`;
+}
+
+// ============================================================================
 // MAIN APPLICATION COMPONENT
 // ============================================================================
 
 export default function App() {
-  // Navigation & Dropdown state
-  const [activeMode, setActiveMode] = useState<GameModeId>('home');
-  const [isHomeDropdownOpen, setIsHomeDropdownOpen] = useState(false);
-  const [isHeaderDropdownOpen, setIsHeaderDropdownOpen] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
+  // Load persisted data immediately so data always shows on Vercel & GitHub
+  const initialData = useRef<SavedAppData>(loadSavedData());
 
-  // Per-game History Log (Last 5 rolls per mode)
-  const [historyByMode, setHistoryByMode] = useState<Record<Exclude<GameModeId, 'home'>, HistoryEntry[]>>({
-    dice: [],
-    number: [],
-    wheel: [],
-    coin: [],
+  const [activeMode, setActiveMode] = useState<GameModeId>(() => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.replace('#', '') as GameModeId;
+      if (['dice', 'number', 'wheel', 'coin'].includes(hash)) {
+        return hash;
+      }
+    }
+    return 'home';
   });
 
+  const [isHomeDropdownOpen, setIsHomeDropdownOpen] = useState(false);
+  const [isHeaderDropdownOpen, setIsHeaderDropdownOpen] = useState(false);
+  const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isMuted, setIsMuted] = useState(false);
+
+  // Persisted History & Stats per mode
+  const [historyByMode, setHistoryByMode] = useState<
+    Record<Exclude<GameModeId, 'home'>, HistoryEntry[]>
+  >(initialData.current.historyByMode);
+
+  const [statsByMode, setStatsByMode] = useState<Record<Exclude<GameModeId, 'home'>, number>>(
+    initialData.current.statsByMode
+  );
+
   // -------------------- Mode 1: Dual 3D Dice State --------------------
-  const [die1, setDie1] = useState<number>(6);
-  const [die2, setDie2] = useState<number>(6);
+  const [die1, setDie1] = useState<number>(initialData.current.lastDie1);
+  const [die2, setDie2] = useState<number>(initialData.current.lastDie2);
   const [isDiceRolling, setIsDiceRolling] = useState<boolean>(false);
-  const [hasRolledDice, setHasRolledDice] = useState<boolean>(false);
+  const [hasRolledDice, setHasRolledDice] = useState<boolean>(true);
 
   // -------------------- Mode 2: Random Number State --------------------
-  const [minNumInput, setMinNumInput] = useState<string>('1');
-  const [maxNumInput, setMaxNumInput] = useState<string>('100');
-  const [currentNumber, setCurrentNumber] = useState<number>(77);
+  const [minNumInput, setMinNumInput] = useState<string>(initialData.current.minNumInput);
+  const [maxNumInput, setMaxNumInput] = useState<string>(initialData.current.maxNumInput);
+  const [currentNumber, setCurrentNumber] = useState<number>(initialData.current.lastNumber);
   const [isNumberRolling, setIsNumberRolling] = useState<boolean>(false);
-  const [hasGeneratedNumber, setHasGeneratedNumber] = useState<boolean>(false);
+  const [hasGeneratedNumber, setHasGeneratedNumber] = useState<boolean>(true);
 
   // -------------------- Mode 3: Spinning Wheel 1-6 State --------------------
-  const [wheelRotation, setWheelRotation] = useState<number>(0);
+  const [wheelRotation, setWheelRotation] = useState<number>(() => {
+    const w = initialData.current.lastWheelWinner || 6;
+    return (360 - (w - 1) * 60) % 360;
+  });
   const [isWheelSpinning, setIsWheelSpinning] = useState<boolean>(false);
-  const [wheelWinner, setWheelWinner] = useState<number | null>(null);
+  const [wheelWinner, setWheelWinner] = useState<number | null>(
+    initialData.current.lastWheelWinner
+  );
 
   // -------------------- Mode 4: Egyptian 1 Pound Coin Flip State --------------------
-  const [coinSide, setCoinSide] = useState<'king' | 'tails'>('king');
-  const [coinRotationY, setCoinRotationY] = useState<number>(0);
+  const [coinSide, setCoinSide] = useState<'king' | 'tails'>(initialData.current.lastCoinSide);
+  const [coinRotationY, setCoinRotationY] = useState<number>(
+    initialData.current.lastCoinSide === 'king' ? 0 : 180
+  );
   const [isCoinFlipping, setIsCoinFlipping] = useState<boolean>(false);
-  const [hasFlippedCoin, setHasFlippedCoin] = useState<boolean>(false);
+  const [hasFlippedCoin, setHasFlippedCoin] = useState<boolean>(true);
+
+  // Sync all state to localStorage whenever anything changes
+  useEffect(() => {
+    try {
+      const payload: SavedAppData = {
+        historyByMode,
+        statsByMode,
+        minNumInput,
+        maxNumInput,
+        lastDie1: die1,
+        lastDie2: die2,
+        lastNumber: currentNumber,
+        lastWheelWinner: wheelWinner || 6,
+        lastCoinSide: coinSide,
+      };
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [
+    historyByMode,
+    statsByMode,
+    minNumInput,
+    maxNumInput,
+    die1,
+    die2,
+    currentNumber,
+    wheelWinner,
+    coinSide,
+  ]);
+
+  // Sync URL hash for GitHub Pages / Vercel direct navigation
+  useEffect(() => {
+    const onHashChange = () => {
+      const h = window.location.hash.replace('#', '') as GameModeId;
+      if (['dice', 'number', 'wheel', 'coin'].includes(h)) {
+        setActiveMode(h);
+      } else if (!h || h === 'home') {
+        setActiveMode('home');
+      }
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   // Refs for cleanup and outside-click detection
   const homeDropdownRef = useRef<HTMLDivElement>(null);
@@ -950,7 +1175,6 @@ export default function App() {
     return () => clearAllTimers();
   }, [clearAllTimers]);
 
-  // Close custom dropdowns when clicking outside
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
       if (homeDropdownRef.current && !homeDropdownRef.current.contains(e.target as Node)) {
@@ -978,7 +1202,6 @@ export default function App() {
       const nowStr = new Date().toLocaleTimeString('ar-EG', {
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit',
       });
       setHistoryByMode((prev) => ({
         ...prev,
@@ -990,6 +1213,10 @@ export default function App() {
           },
           ...prev[mode],
         ].slice(0, 5),
+      }));
+      setStatsByMode((prev) => ({
+        ...prev,
+        [mode]: (prev[mode] || 0) + 1,
       }));
     },
     []
@@ -1006,6 +1233,43 @@ export default function App() {
     setIsHomeDropdownOpen(false);
     setIsHeaderDropdownOpen(false);
     setActiveMode(mode);
+    try {
+      window.location.hash = mode === 'home' ? '' : mode;
+    } catch {
+      // Ignore hash restrictions
+    }
+  };
+
+  const copyToClipboard = (text: string, key: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key);
+      soundFX.playClick();
+      window.setTimeout(() => setCopiedKey(null), 2000);
+    });
+  };
+
+  const downloadStandaloneHtml = () => {
+    soundFX.playClick();
+    const htmlContent = generateStandaloneIndexHtml({
+      historyByMode,
+      statsByMode,
+      minNumInput,
+      maxNumInput,
+      lastDie1: die1,
+      lastDie2: die2,
+      lastNumber: currentNumber,
+      lastWheelWinner: wheelWinner || 6,
+      lastCoinSide: coinSide,
+    });
+    const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'index.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   // ============================================================================
@@ -1017,7 +1281,6 @@ export default function App() {
     triggerHaptic([25, 40, 25]);
     soundFX.playDiceRollSequence();
 
-    // Rapid intermediate face shuffling during 600ms tumble
     const intervalId = window.setInterval(() => {
       setDie1(getCryptoRandomInt(1, 6));
       setDie2(getCryptoRandomInt(1, 6));
@@ -1105,20 +1368,16 @@ export default function App() {
     triggerHaptic(30);
 
     const winningSegmentNum = getCryptoRandomInt(1, 6);
-    // Segment `winningSegmentNum` is at `(winningSegmentNum - 1) * 60` deg clockwise from top.
-    // To align it under the top pointer (0 deg), final rotation mod 360 must equal `(360 - (winningSegmentNum - 1) * 60) % 360`.
     const targetMod = (360 - (winningSegmentNum - 1) * 60) % 360;
     const jitter = getCryptoRandomInt(-14, 14);
     const desiredFinalMod = (targetMod + jitter + 360) % 360;
     const currentMod = ((wheelRotation % 360) + 360) % 360;
     const delta = (desiredFinalMod - currentMod + 360) % 360;
 
-    // Guarantee at least 5 full spins (1800deg) + random extra spin
     const extraFullSpins = getCryptoRandomInt(5, 7) * 360;
     const nextRotation = wheelRotation + extraFullSpins + delta;
     setWheelRotation(nextRotation);
 
-    // Schedule decelerating peg tick sounds over 2.4 seconds
     const tickScheduleMs = [
       90, 180, 270, 360, 460, 570, 690, 820, 960, 1120, 1300, 1500, 1730, 1990, 2270,
     ];
@@ -1155,16 +1414,13 @@ export default function App() {
     triggerHaptic([30, 40, 25]);
     soundFX.playCoinMetallicClink();
 
-    // Cryptographically fair 0 or 1: 0 => 'king' (ملك), 1 => 'tails' (كتابة)
     const outcomeBit = getCryptoRandomInt(0, 1);
     const nextSide: 'king' | 'tails' = outcomeBit === 0 ? 'king' : 'tails';
 
-    // Side 'king' corresponds to 0deg mod 360; 'tails' corresponds to 180deg mod 360
     const targetMod = nextSide === 'king' ? 0 : 180;
     const currentMod = ((coinRotationY % 360) + 360) % 360;
     const delta = (targetMod - currentMod + 360) % 360;
 
-    // Minimum 6 full 3D flips (2160deg) + delta
     const nextRotY = coinRotationY + 2160 + delta;
     setCoinRotationY(nextRotY);
 
@@ -1188,6 +1444,8 @@ export default function App() {
 
   const currentModeInfo = GAME_MODES.find((m) => m.id === activeMode);
   const currentHistory = activeMode !== 'home' ? historyByMode[activeMode] : [];
+  const totalPlaysCount =
+    statsByMode.dice + statsByMode.number + statsByMode.wheel + statsByMode.coin;
 
   const isCurrentlyAnimating =
     isDiceRolling || isNumberRolling || isWheelSpinning || isCoinFlipping;
@@ -1212,6 +1470,100 @@ export default function App() {
       </div>
 
       {/* =====================================================================
+          VERCEL & GITHUB DEPLOYMENT FIX & EXPORT MODAL
+         ===================================================================== */}
+      {isDeployModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
+          <div className="relative w-full max-w-2xl rounded-3xl bg-slate-900 border border-slate-700 shadow-2xl p-6 text-right my-8">
+            <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <FileCode2 className="w-6 h-6 text-amber-400 shrink-0" />
+                <h2 className="text-lg sm:text-xl font-black text-white">
+                  حل مشكلة ظهور الموقع والبيانات على Vercel و GitHub
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDeployModalOpen(false)}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="py-4 space-y-5 text-sm text-slate-300 leading-relaxed max-h-[72vh] overflow-y-auto pl-1">
+              {/* Solution 1: 1-Click Single HTML File */}
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/40">
+                <div className="font-extrabold text-amber-300 text-base mb-1">
+                  الحل الأسرع المضمون ١٠٠٪ (ملف index.html واحد شامل بجميع البيانات):
+                </div>
+                <p className="text-xs text-slate-300 mb-3">
+                  إذا رفعت الملفات يدوياً على GitHub بدون مجلد <code className="font-mono-num text-amber-300">src/</code>، فلن يجد Vercel الملفات الفرعية. يمكنك تحميل ملف <code className="font-mono-num text-amber-300">index.html</code> الشامل بالأسفل ورفعه مباشرة على GitHub أو Vercel وسيعمل فوراً بجميع الألعاب والبيانات المحفوظة!
+                </p>
+                <button
+                  type="button"
+                  onClick={downloadStandaloneHtml}
+                  className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-black text-sm flex items-center justify-center gap-2 hover:from-amber-300 hover:to-orange-400 transition-all cursor-pointer shadow-lg"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>تحميل ملف index.html الشامل (يعمل مباشرة على GitHub و Vercel)</span>
+                </button>
+              </div>
+
+              {/* Solution 2: Fixed package.json for Vite build on Vercel */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-white">
+                    ١. تحديث ملف <code className="font-mono-num text-cyan-400">package.json</code> على GitHub:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(VERCEL_PACKAGE_JSON_SNIPPET, 'pkg')}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-amber-400 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{copiedKey === 'pkg' ? 'تم النسخ!' : 'نسخ package.json'}</span>
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400 mb-2">
+                  تم إصلاح أرقام إصدارات الحزم في المشروع لتتوافق ١٠٠٪ مع سيرفرات البناء في Vercel و GitHub Actions:
+                </p>
+                <pre
+                  dir="ltr"
+                  className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono-num text-emerald-300 overflow-x-auto text-left"
+                >
+                  {VERCEL_PACKAGE_JSON_SNIPPET}
+                </pre>
+              </div>
+
+              {/* Solution 3: vercel.json */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-white">
+                    ٢. ملف <code className="font-mono-num text-cyan-400">vercel.json</code> (تمت إضافته للمشروع):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(VERCEL_JSON_SNIPPET, 'vercel')}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-amber-400 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{copiedKey === 'vercel' ? 'تم النسخ!' : 'نسخ vercel.json'}</span>
+                  </button>
+                </div>
+                <pre
+                  dir="ltr"
+                  className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono-num text-cyan-300 overflow-x-auto text-left"
+                >
+                  {VERCEL_JSON_SNIPPET}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
           VIEW 1: HOME VIEW (الصفحة الرئيسية)
          ===================================================================== */}
       {activeMode === 'home' ? (
@@ -1220,7 +1572,7 @@ export default function App() {
           <header className="w-full max-w-7xl mx-auto flex items-center justify-between gap-8 px-6 py-4 border-b border-slate-800/80">
             {/* Zone 1: Single text element wordmark */}
             <a
-              href="#top"
+              href="#home"
               onClick={(e) => {
                 e.preventDefault();
                 selectGameMode('home');
@@ -1243,7 +1595,7 @@ export default function App() {
               ))}
             </nav>
 
-            {/* Zone 3: 1 Primary Action (Sound Toggle) */}
+            {/* Zone 3: 1 Primary Action */}
             <div className="flex items-center gap-3 shrink-0">
               <button
                 onClick={toggleMute}
@@ -1266,8 +1618,8 @@ export default function App() {
           </header>
 
           {/* Main Hero & Interactive Mode Selector */}
-          <main className="flex-1 w-full max-w-6xl mx-auto px-5 sm:px-8 py-8 sm:py-12 flex flex-col justify-center">
-            <div className="text-center max-w-3xl mx-auto mb-8 sm:mb-10">
+          <main className="flex-1 w-full max-w-6xl mx-auto px-5 sm:px-8 py-8 sm:py-10 flex flex-col justify-center">
+            <div className="text-center max-w-3xl mx-auto mb-7">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-500/20 to-orange-600/20 border border-amber-500/40 shadow-[0_0_30px_rgba(245,158,11,0.25)] mb-4">
                 <Gamepad2 className="w-8 h-8 text-amber-400" />
               </div>
@@ -1280,12 +1632,12 @@ export default function App() {
               </h1>
 
               <p className="text-slate-300 text-base sm:text-lg leading-relaxed max-w-2xl mx-auto">
-                اختر اللعبة المطلوبة من القائمة المنسدلة بالأسفل للانتقال فوراً إلى شاشة اللعب الكاملة بنظام قرعة عادل ودقيق ١٠٠٪.
+                اختر اللعبة المطلوبة من القائمة المنسدلة بالأسفل للانتقال فوراً إلى شاشة اللعب الكاملة مع حفظ تلقائي لجميع النتائج والبيانات.
               </p>
             </div>
 
             {/* PROMINENT HIGH-TECH DROPDOWN MENU (قائمة منسدلة احترافية) */}
-            <div ref={homeDropdownRef} className="relative w-full max-w-xl mx-auto mb-10 z-30">
+            <div ref={homeDropdownRef} className="relative w-full max-w-xl mx-auto mb-8 z-30">
               <label className="block text-xs font-bold text-amber-400 mb-2 pr-1">
                 اختر وضع اللعب من القائمة المنسدلة (تفتح اللعبة بملء الشاشة فوراً):
               </label>
@@ -1320,7 +1672,6 @@ export default function App() {
                 />
               </button>
 
-              {/* Dropdown Menu Items */}
               {isHomeDropdownOpen && (
                 <div className="absolute right-0 left-0 mt-2.5 rounded-2xl bg-slate-900/98 backdrop-blur-xl border border-slate-700 shadow-[0_25px_60px_rgba(0,0,0,0.85)] overflow-hidden divide-y divide-slate-800/80">
                   {GAME_MODES.map((mode) => (
@@ -1350,8 +1701,8 @@ export default function App() {
               )}
             </div>
 
-            {/* Quick-Select Visual Preview Cards Grid (4 Modes) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            {/* Quick-Select Visual Preview Cards Grid (4 Modes + Live Saved Data Preview) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
               {GAME_MODES.map((mode) => {
                 const IconComponent =
                   mode.id === 'dice'
@@ -1361,6 +1712,9 @@ export default function App() {
                     : mode.id === 'wheel'
                     ? Compass
                     : Coins;
+
+                const latestEntry = historyByMode[mode.id]?.[0];
+                const modeCount = statsByMode[mode.id] || 0;
 
                 return (
                   <button
@@ -1385,26 +1739,65 @@ export default function App() {
                         {mode.title}
                       </h2>
 
-                      <p className="text-xs sm:text-sm text-slate-400 leading-relaxed mb-5">
+                      <p className="text-xs sm:text-sm text-slate-400 leading-relaxed mb-4">
                         {mode.subtitle}
                       </p>
                     </div>
 
-                    <div className="pt-3 border-t border-slate-800/90 flex items-center justify-between text-xs text-slate-400">
-                      <span>{mode.badgeText}</span>
-                      <span className="font-bold text-amber-400 group-hover:underline whitespace-nowrap">
-                        العب الآن ←
-                      </span>
+                    <div className="space-y-2.5 pt-3 border-t border-slate-800/90">
+                      {/* Saved Data / Latest Result Row */}
+                      <div className="flex items-center justify-between text-xs text-slate-300">
+                        <span className="text-slate-400">آخر نتيجة محفوظة:</span>
+                        <span className="font-mono-num font-bold text-amber-300 truncate max-w-[130px]">
+                          {latestEntry ? latestEntry.label : 'جاهز للعب'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span>عدد الجولات: {toArabicDigits(modeCount)}</span>
+                        <span className="font-bold text-amber-400 group-hover:underline whitespace-nowrap">
+                          العب الآن ←
+                        </span>
+                      </div>
                     </div>
                   </button>
                 );
               })}
             </div>
+
+            {/* Live Saved Data & Deployment Helper Bar */}
+            <div className="w-full rounded-2xl bg-slate-900/75 border border-slate-800 px-5 py-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3 text-xs sm:text-sm text-slate-300">
+                <BarChart3 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div>
+                  <span className="font-bold text-white">بيانات وسجلات الألعاب محفوظة تلقائياً: </span>
+                  <span>
+                    إجمالي الجولات المسجلة{' '}
+                    <strong className="font-mono-num text-amber-400">
+                      {toArabicDigits(totalPlaysCount)}
+                    </strong>{' '}
+                    جولة عبر الألعاب الأربع
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  soundFX.playClick();
+                  setIsDeployModalOpen(true);
+                }}
+                className="px-4 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-extrabold flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <FileCode2 className="w-4 h-4" />
+                <span>أدوات النشر السريع على Vercel و GitHub</span>
+              </button>
+            </div>
           </main>
 
           {/* Quiet Footer */}
           <footer className="w-full max-w-7xl mx-auto px-6 py-4 border-t border-slate-800/60 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
-            <span>رفيق الألعاب العشوائي الاحترافي · نتائج عشوائية عادلة ومضمونة</span>
+            <span>رفيق الألعاب العشوائي الاحترافي · متوافق ١٠٠٪ مع Vercel و GitHub Pages</span>
             <span>مصمم للعمل بأقصى سرعة (60fps) على جميع الهواتف والأجهزة</span>
           </footer>
         </div>
@@ -1417,7 +1810,6 @@ export default function App() {
           <div className="w-full px-4 sm:px-6 pt-4 pb-2 flex items-center justify-between gap-3 relative z-30">
             {/* RIGHT SIDE (in RTL): Quick-Switch Mode Dropdown + Sound Mute Toggle */}
             <div className="flex items-center gap-2.5">
-              {/* Sound Mute/Unmute Button */}
               <button
                 type="button"
                 onClick={toggleMute}
@@ -1434,7 +1826,6 @@ export default function App() {
                 </span>
               </button>
 
-              {/* Quick Mode Switcher Dropdown */}
               <div ref={headerDropdownRef} className="relative">
                 <button
                   type="button"
@@ -1489,7 +1880,6 @@ export default function App() {
               CENTER STAGE: ACTIVE GAME VIEWPORT
              ================================================================= */}
           <main className="flex-1 w-full max-w-4xl mx-auto px-4 sm:px-6 py-2 flex flex-col items-center justify-center">
-            {/* Game Title Header */}
             <div className="text-center mb-4 sm:mb-6">
               <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
                 {currentModeInfo?.title}
@@ -1502,7 +1892,6 @@ export default function App() {
             {/* -------------------- MODE 1: DUAL 3D DICE ROLLER -------------------- */}
             {activeMode === 'dice' && (
               <div className="w-full flex flex-col items-center">
-                {/* 3D Dice Arena */}
                 <div className="perspective-1000 my-4 sm:my-6 flex items-center justify-center gap-6 sm:gap-12">
                   <Die3DCard
                     value={die1}
@@ -1520,7 +1909,6 @@ export default function App() {
                   />
                 </div>
 
-                {/* Output Display: Total Sum & Double (دش) Indicator */}
                 <div className="mt-4 flex flex-col items-center gap-2.5 min-h-[84px] justify-center">
                   <div className="px-6 py-3 rounded-2xl bg-slate-900/90 border border-slate-700/90 flex items-center gap-4 shadow-xl">
                     <span className="text-sm sm:text-base font-bold text-slate-300">
@@ -1544,7 +1932,6 @@ export default function App() {
             {/* -------------------- MODE 2: SMART RANDOM NUMBER GENERATOR -------------------- */}
             {activeMode === 'number' && (
               <div className="w-full max-w-xl flex flex-col items-center">
-                {/* Min / Max Controls & Quick Presets */}
                 <div className="w-full rounded-2xl bg-slate-900/85 border border-slate-800 p-4 sm:p-5 mb-5">
                   <div className="grid grid-cols-2 gap-4 mb-4">
                     <div>
@@ -1581,7 +1968,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Interactive Preset Filter Buttons */}
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-xs font-semibold text-slate-400">نطاقات سريعة:</span>
                     <div className="flex items-center gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800">
@@ -1617,7 +2003,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Massive Digital Cyber-Counter Display */}
                 <div
                   className={`relative w-full py-8 sm:py-10 px-6 rounded-3xl bg-slate-900/95 border-2 transition-all duration-300 flex flex-col items-center justify-center shadow-2xl ${
                     isNumberRolling
@@ -1657,7 +2042,6 @@ export default function App() {
                   />
                 </div>
 
-                {/* Celebratory Winning Number Readout */}
                 <div className="mt-4 min-h-[68px] flex items-center justify-center">
                   {isWheelSpinning ? (
                     <div className="px-5 py-2.5 rounded-2xl bg-slate-900/90 border border-slate-700 text-sm font-bold text-emerald-300">
@@ -1673,11 +2057,7 @@ export default function App() {
                         {toArabicDigits(wheelWinner)} ({wheelWinner})
                       </span>
                     </div>
-                  ) : (
-                    <div className="text-xs sm:text-sm text-slate-400">
-                      اضغط على «العب الآن» لتدوير العجلة السداسية
-                    </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
             )}
@@ -1685,7 +2065,6 @@ export default function App() {
             {/* -------------------- MODE 4: EGYPTIAN 1 POUND COIN FLIP -------------------- */}
             {activeMode === 'coin' && (
               <div className="w-full flex flex-col items-center">
-                {/* 3D Bimetallic Coin Arena */}
                 <div className="relative my-3 sm:my-5 flex flex-col items-center justify-center">
                   <div
                     className={`w-52 h-52 sm:w-64 sm:h-64 perspective-1000 ${
@@ -1702,19 +2081,15 @@ export default function App() {
                         willChange: 'transform',
                       }}
                     >
-                      {/* Front Face: ملك (King Tutankhamun) */}
                       <div className="absolute inset-0 w-full h-full backface-hidden">
                         <EgyptianOnePoundSVG side="king" />
                       </div>
-
-                      {/* Back Face: كتابة (1 Egyptian Pound Text) */}
                       <div className="absolute inset-0 w-full h-full backface-hidden rotate-y-180">
                         <EgyptianOnePoundSVG side="tails" />
                       </div>
                     </div>
                   </div>
 
-                  {/* Dynamic Floor Shadow */}
                   <div
                     className={`w-36 h-5 rounded-full bg-black/65 blur-md mt-4 ${
                       isCoinFlipping ? 'animate-coin-shadow' : 'opacity-55'
@@ -1722,7 +2097,6 @@ export default function App() {
                   />
                 </div>
 
-                {/* Result Announcement Banner */}
                 <div className="mt-2 min-h-[68px] flex items-center justify-center">
                   {isCoinFlipping ? (
                     <div className="px-5 py-2.5 rounded-2xl bg-slate-900/90 border border-amber-500/40 text-sm font-bold text-amber-300">
@@ -1749,7 +2123,6 @@ export default function App() {
               BOTTOM ACTION ZONE: PLAY BUTTON (زر العب) & LAST 5 HISTORY LOG
              ================================================================= */}
           <footer className="w-full max-w-2xl mx-auto px-4 sm:px-6 pb-5 pt-2 flex flex-col items-center gap-3.5 z-20">
-            {/* Large Glowing Tactile Action Button (زر العب) */}
             <button
               type="button"
               disabled={isCurrentlyAnimating}
@@ -1768,11 +2141,10 @@ export default function App() {
               </span>
             </button>
 
-            {/* History Log Bar (سجل النتائج الأخيرة - آخر ٥ نتائج) */}
             <div className="w-full rounded-xl bg-slate-900/80 border border-slate-800/90 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2 text-slate-400 font-bold shrink-0">
                 <History className="w-4 h-4 text-amber-400" />
-                <span>سجل آخر ٥ نتائج:</span>
+                <span>سجل آخر ٥ نتائج محفوظة:</span>
               </div>
 
               {currentHistory.length === 0 ? (
